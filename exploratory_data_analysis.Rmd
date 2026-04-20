@@ -1,0 +1,789 @@
+---
+title: "Exploratory Data Analysis on HIV Trends, Neonatal & Under-five Mortality Rates"
+author: "Kelvin Ziro"
+date: "2025-04-27"
+output: html_document
+---
+
+## Data Acquisition & Report Setup
+
+```{r setup, include=FALSE}
+# Rmd file set up
+library(reticulate)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Dependencies
+
+```{r eval=FALSE}
+# Run these in the console
+install.packages("reticulate")
+py_install(c("numpy", "pandas", "geopandas", "matplotlib", "seaborn", "re"))
+```
+
+
+```{python, warning=FALSE, error=FALSE}
+# Import libraries & data
+import numpy as np
+import pandas as pd
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import re
+
+# Data importation
+hiv_df = pd.read_csv("data/datasets/hiv_data_2000_2023.csv")
+under_five_df = pd.read_csv("data/datasets/under_five_mortality_rate.csv")
+noenatal_df = pd.read_csv("data/datasets/neonatal_mortality_rate.csv")
+multidimensional_df = pd.read_excel("data/datasets/multidimensional_poverty.xlsx")
+child_mort_df = pd.read_csv("data/datasets/dataset_datascience.csv")
+```
+
+## Project Source
+
+[CEMA-training, Data Science Internship Track](https://github.com/CEMA-training/internship_task_dscience?tab=readme-ov-file)
+
+## Data Cleaning & Initial EDA
+
+```{python}
+hiv_df.info()
+```
+```{python}
+hiv_df.head()
+```
+```{python}
+hiv_df.tail()
+```
+**Dimensions**:
+
+- Observations: *1552*
+- Variables: *11 (1 of int64 type, the rest are of object type)*
+
+**Variables of interest**:
+
+- ParentLocationCode
+- ParentLocation
+- Location
+- Period
+- Value
+
+### ParentLocationCode & ParentLocation
+
+```{python}
+print(hiv_df["ParentLocationCode"].unique())
+print(hiv_df["ParentLocation"].unique())
+```
+
+We have a total of `6` regions recorded in the dataset as `ParentLocation`s along with their codes.
+
+### Location
+
+```{python}
+unique_locations = hiv_df["Location"].unique()
+len(unique_locations)
+```
+`194` Unique locations are recorded in the dataset
+
+### Period
+```{python}
+years_recorded = hiv_df["Period"].unique()
+years_recorded
+```
+`8` different years are recorded in the dataset.
+
+### Value
+```{python}
+# Inspect the Value column
+hiv_df["Value"].value_counts()
+```
+Assuming that the value column is the estimated no. of HIV infected people in each country in the respective year, the `Value` column should contain numeric values but instead, we have object types. We extract the numeric values from the column and create a new column with the numeric values instead. We also replace the "No data" entries with `np.NaN`.
+
+Assumptions made during this process:
+
+- For records in the `Value` column that were entered in the format `<500`, We assume that the digit i.e. `500` was the largest possible value that could have been recorded for that year.
+
+```{python}
+def clean_text(text):
+    # Define a regex pattern to match the Value column data
+    pattern = re.compile(r"\[<?\d+\s?\d+?\s?\d+?\s*-\s*<?\d+\s?\d+?\s?\d+?\]")
+    
+    # Replace the specified pattern with an empty string
+    new_text = re.sub(pattern, "", text)
+
+    # Replace the "<" sign infront of any remaining text
+    new_text = new_text.replace("<", "")
+    new_text = new_text.replace(" ", "")
+
+    # Remove leading and trailing whitespaces
+    new_text = new_text.strip()
+
+    # Replace "No data" with np.nan value
+    new_text = np.nan if new_text == "Nodata" else new_text
+
+    return new_text
+```
+
+```{python}
+hiv_df["cleaned_values"] = pd.to_numeric(hiv_df["Value"].apply(clean_text))
+hiv_df.info()
+```
+Since we only have `8` distinct years in the `Period` column, we pivot the data frame to have the years as separate columns so as to have a clearer view of which data points are missing when we investigate for missing values.
+
+```{python}
+# Pivot the data to have the years be columns
+pivoted_hiv_df = hiv_df.pivot_table(
+    index=["IndicatorCode", "Indicator", "ValueType", "ParentLocationCode", 
+           "Location type", "SpatialDimValueCode", "Location", "Period type"],
+    columns="Period",
+    values="cleaned_values"
+).reset_index()
+
+# Flatten the column names to remove multi-index and treat years as regular columns
+pivoted_hiv_df.columns.name = None
+```
+
+```{python}
+pivoted_hiv_df.info()
+```
+
+### Check for duplicates
+```{python}
+# Filter dataframe for duplicate records
+pivoted_hiv_df[pivoted_hiv_df.duplicated()].shape
+```
+
+There appears to be no duplicate records in the data frame.
+
+### Check for missing values
+We inspect the locations further as there were `194` unique locations in the original data set but in the pivoted data frame, the no. of unique locations is `147`.
+
+```{python}
+# Inspect unique locations in the original dataframe that are not in the pivoted dataframe
+unique_pivoted_locations = pivoted_hiv_df["Location"].unique()
+left_out_countries = unique_locations[~np.isin(unique_locations, unique_pivoted_locations)]
+left_out_countries
+```
+```{python}
+hiv_df[
+hiv_df["Location"] == "United States of America"][["Period", "cleaned_values"]]
+```
+We see that one of the countries returned have a characteristic of missing values across all years. We make sure that all the other countries returned share the same characteristic i.e. they have missing data across all the years.
+
+```{python}
+# Check null values by country
+null_records = hiv_df[hiv_df["cleaned_values"].isnull()]
+
+# Filter for countries that have null values across all eight years
+null_counts = null_records["Location"].value_counts()
+full_null_counts = null_counts[null_counts == 8].index
+
+# Compare the left out countries and those with no records across all eight years
+print(left_out_countries.shape)
+print(full_null_counts.shape)
+np.sort(left_out_countries) == np.sort(full_null_counts)
+```
+We confirm that all countries left out share the same characteristic which means that they were automatically discarded when creating the pivoted dataframe.
+
+```{python}
+# Filter the dataframe for observations with null values
+pivoted_hiv_df[pivoted_hiv_df.isnull().any(axis=1)]
+```
+We notice that India only has the estimated no. of HIV infected recorded on 2023. We discard it as it would not help in visualizing the trend of infections across the years.
+
+As for the other records with a few missing datapoints towards the edges of the years, we can use the `ffill` and `bfill` functions to estimate the missing values based on the neighbouring data points to prevent too much loss of data.
+
+```{python}
+# specify the columns to modify
+year_columns = [2000, 2005, 2010, 2015, 2020, 2021, 2022, 2023]
+
+# Make a copy of the dataframe
+filled_hiv_df = pivoted_hiv_df.copy()
+
+# Remove India from the dataframe
+filled_hiv_df = filled_hiv_df[filled_hiv_df["Location"] != "India"]
+
+# Target the columns to fill
+filled_hiv_df[year_columns] = filled_hiv_df[year_columns].ffill(
+    axis=1).bfill(axis=1)
+
+# Check to see if the filled df has any null values
+filled_hiv_df[filled_hiv_df.isnull().any(axis=1)]
+```
+## Question 1
+
+You are provided with a dataset from the World Health Organization (WHO) Global Observatory, containing data on people living with HIV at the country level from 2000 to 2023.
+
+Using this dataset:
+
+### Part 1
+
+**Section a**\
+Create a visualization that shows the trend of HIV cases in the countries that contribute to 75% of the global burden
+
+```{python}
+# Get a subset of interest from the transformed dataset
+filter_columns = ["ParentLocationCode", "Location", 2000, 2005, 2010, 2015, 
+                  2020, 2021, 2022, 2023]
+df = filled_hiv_df[filter_columns]
+df.head()
+```
+```{python}
+# Create a copy of the cleaned dataframe
+proportion_df = df.copy()
+```
+
+```{python}
+# Get the total estimate of HIV infected globally in each year
+yearly_global_total = proportion_df[year_columns].sum(axis=0)
+```
+
+```{python}
+# Compute each country's proportion against the global total estimate in each year
+proportion_df[year_columns] = proportion_df[year_columns] / yearly_global_total
+```
+
+```{python}
+# Compute each country's avg proportion over the years
+proportion_df["avg_prop"] = proportion_df[year_columns].mean(axis=1)
+proportion_df.head()
+```
+```{python}
+# Sort the countries according to the avg_prop in descending order
+major_global_contributors = proportion_df.sort_values(by="avg_prop", ascending=False)
+
+# Compute the cumulative avg proportions
+major_global_contributors["cumulative_prop"] = major_global_contributors["avg_prop"].cumsum()
+
+# Filter out the countries that contributed to 75% of the global burden
+major_global_contributors = major_global_contributors[major_global_contributors["cumulative_prop"] <= 0.75]
+```
+
+```{python}
+# Filter the cleaned dataframe for the major contributing countries
+hiv_trend_global = df[df["Location"].isin(list(major_global_contributors["Location"]))]
+```
+
+```{python}
+# Melt the global hiv trend dataframe
+melted_global_trend = hiv_trend_global.melt(
+    id_vars=["ParentLocationCode", "Location"],
+    value_vars=year_columns,
+    var_name="Year",
+    value_name="InfectedEstimate")
+```
+
+```{python}
+melted_global_trend.head()
+```
+
+```{python}
+# Create a figure
+plt.figure(figsize=(12, 8))
+
+# Define distinct colors for each contries line plot
+colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', 
+          '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf',
+         "#ff1493", "#00ced1", "#ffd700", "#228b22"]
+
+# Iterate through each country and plot the trend
+for i, location in enumerate(melted_global_trend["Location"].unique()):
+    country_data = melted_global_trend[melted_global_trend["Location"] == location]
+    plt.plot(country_data["Year"], 
+             country_data["InfectedEstimate"], 
+             marker="o", label=location, color=colors[i])
+
+# Set the title, xlabel, ylabel, grid and legend
+plt.title(
+  "HIV Infected Estimates Trend per Major Contributing Country Globally",
+  fontsize=16)
+plt.xlabel("Year")
+plt.ylabel("HIV Infected Estimate")
+plt.grid(True)
+plt.legend()
+
+# Display the plot
+plt.show()
+```
+
+**Section b**\
+Generate a visualization that displays the trend of HIV cases in the countries contributing to 75% of the burden within each WHO region (column called `ParentLocationCode` contains the WHO regions)
+
+```{python}
+# melt the pivoted dataframe into long format
+melted_regional_df = df.melt(
+    id_vars=["ParentLocationCode", "Location"],
+    value_vars=year_columns,
+    var_name="Year",
+    value_name="InfectedEstimate")
+
+# Remove India records from the dataset
+melted_regional_df = melted_regional_df[melted_regional_df["Location"] != "India"]
+melted_regional_df
+```
+
+```{python}
+# Compute the regional total estimates
+region_totals = melted_regional_df.groupby(
+    ['ParentLocationCode', 'Year'])['InfectedEstimate'].sum().reset_index(
+    name='Region_Total')
+
+# Merge the regional total estimates on the melted dataframe
+melted_regional_df = melted_regional_df.merge(
+    region_totals, on=['ParentLocationCode', 'Year'])
+
+# Compute the proportions
+melted_regional_df['Proportion'] = melted_regional_df['InfectedEstimate'] / melted_regional_df['Region_Total']
+
+melted_regional_df
+```
+```{python}
+# Compute average proportions across years (per country)
+regional_avg_prop = melted_regional_df.groupby(['ParentLocationCode', 'Location'])['Proportion'].mean().reset_index()
+
+# Sort countries by contribution in each region
+regional_avg_prop = regional_avg_prop.sort_values(['ParentLocationCode', 'Proportion'], ascending=[True, False])
+
+# Compute cumulative sum of proportions per region
+regional_avg_prop['Cumulative_Proportion'] = regional_avg_prop.groupby('ParentLocationCode')['Proportion'].cumsum()
+
+# Filter countries contributing up to 75% of their regional burden
+major_regional_contributors = regional_avg_prop[regional_avg_prop['Cumulative_Proportion'] <= 0.75]
+
+major_regional_contributors
+```
+
+```{python}
+# Melt/unpivot the regional trend of HIV Infected estimates
+hiv_trend_regional = df[df["Location"].isin(list(major_regional_contributors["Location"]))]
+
+melted_regional_trend = hiv_trend_regional.melt(
+    id_vars=["ParentLocationCode", "Location"],
+    value_vars=year_columns,
+    var_name="Year",
+    value_name="InfectedEstimate"
+)
+
+melted_regional_trend
+```
+
+```{python}
+# Create a figure of multiple subplots for each region
+fig, axes = plt.subplots(nrows=2, ncols=3, figsize=(20, 10))  # 2 rows x 3 columns = 6 plots
+axes = axes.flatten()  # Flatten the 2D array of axes to 1D for easy iteration
+
+# Get all the distinct regions
+regions = melted_regional_trend["ParentLocationCode"].unique()
+
+# Iterate through each region and plot the major regional contributing countries
+for i, region in enumerate(regions):
+    ax = axes[i]
+    region_data = melted_regional_trend[melted_regional_trend['ParentLocationCode'] == region]
+    
+    for location in region_data['Location'].unique():
+        country_data = melted_regional_trend[melted_regional_trend['Location'] == location]
+        ax.plot(country_data['Year'], country_data['InfectedEstimate'], marker='o', label=location)
+
+    # Set title, xlabel, ylabel, legend and grid for each plot
+    ax.set_title(f'Region: {region}')
+    ax.set_xlabel('Year')
+    ax.set_ylabel('Infected Estimate')
+    ax.legend(fontsize='small')
+    ax.grid(True)
+
+# Adjust the plot's layout
+plt.tight_layout()
+
+# Display the plot
+plt.show()
+```
+
+### Part 2
+You have also been provided with World Bank data on the multidimensional poverty headcount ratio, which includes factors such as income, educational attainment, school enrolment, electricity access, sanitation and drinking water.
+
+Merge this dataset with the HIV data above and analyze the relationship between people living with HIV and multidimensional poverty, and the individual factors that contribute to the ratio. Remember to account for the random effects (country, year).
+
+Write a paragraph on your findings.
+
+**Clean the Multi-dimensional Dataframe**
+
+```{python}
+multidimensional_df.head()
+```
+```{python}
+# Get the columns
+multidimensional_df.columns
+```
+```{python}
+# Create a column rename mapping
+column_mapping = {
+    "Individuals in households deprived in each indicator, 110 economies, circa year 2021 (2018-2023)\nDate: October 2024": "Region",
+    "Unnamed: 1": "Country code",
+    "Unnamed: 2": "Economy",
+    "Unnamed: 3": "Reporting year",
+    "Unnamed: 4": "Survey name",
+    "Unnamed: 5": "Survey year",
+    "Unnamed: 6": "Survey coverage",
+    "Unnamed: 7": "Welfare type",
+    "Unnamed: 8": "Survey comparability",
+    "Unnamed: 9": "Monetary",
+    "Unnamed: 10": "Educational attainment",
+    "Unnamed: 11": "Educational enrollment",
+    "Unnamed: 12": "Electricity",
+    "Unnamed: 13": "Sanitation",
+    "Unnamed: 14": "Drinking water",
+    "Unnamed: 15": "Poverty headcount ratio"}
+
+# Rename the columns in the dataframe
+md_df = multidimensional_df.rename(columns=column_mapping)
+
+# Remove the rows at index 0 and 1
+md_df = md_df.drop(index=[0, 1])
+```
+
+```{python}
+md_df.head()
+```
+```{python}
+# Calculate the average estimated no. of infected across years for each country
+left_df = df.copy()
+left_df["AvgInfectedEstimate"] = left_df[year_columns].mean(axis=1)
+left_df = left_df[["ParentLocationCode", "Location", "AvgInfectedEstimate"]]
+```
+
+```{python}
+# Merge the WHO and Worldbank dataframe on Location
+subset_columns = ["Economy", "Monetary", "Educational attainment",
+                  "Educational enrollment", "Electricity", "Sanitation",
+                  "Drinking water", "Poverty headcount ratio"]
+right_df = md_df[subset_columns]
+right_df = right_df.rename(columns={"Economy": "Location"})
+```
+
+```{python}
+right_df.head()
+```
+```{python}
+merged_df = left_df.merge(right_df, how="inner", on="Location")
+merged_df.head()
+```
+
+```{python}
+merged_df.info()
+```
+
+We notice that the `Poverty headcount ratio` as well as the other factors are numeric but are represented as object types in the dataset. Let's change this.
+
+```{python}
+# Define the numeric columns
+numeric_columns = ['Monetary', 'Educational attainment', 'Educational enrollment', 
+                   'Electricity','Sanitation', 'Drinking water', 
+                   'Poverty headcount ratio']
+
+# Create a copy of the merged dataframe
+numeric_merged_df = merged_df.copy()
+
+# Cast the object types into numeric types
+numeric_merged_df[numeric_columns] = numeric_merged_df[numeric_columns].apply(pd.to_numeric, errors="coerce")
+```
+
+```{python}
+numeric_merged_df.info()
+```
+
+```{python}
+# Remove records with null values on any variable
+numeric_merged_df = numeric_merged_df[numeric_merged_df[numeric_columns].notnull().all(axis=1)]
+
+numeric_merged_df.info()
+```
+
+
+```{python}
+# Select numeric columns
+numeric_vars = numeric_merged_df.select_dtypes(include=["float64"])
+
+# Compute the correlation matrix
+corr_matrix = numeric_vars.corr()
+
+# Plot the correlation matrix
+plt.figure(figsize=(9, 7))
+sns.heatmap(corr_matrix, annot=True, cmap="coolwarm", fmt=".2f", linewidths=0.5)
+plt.title("HIV Infected Avg. Estimates Correlation to World Bank Factors", fontsize=16)
+
+# Adjust the layout
+plt.tight_layout()
+
+# Display the correlation matrix
+plt.show()
+```
+
+
+**Results summary**\
+South Africa has a significant upward trend compared to countries it shares a region with and globally as well. The African region has more countries contributing to the overall global burden as compared to other regions. In terms of how correlated the Avg. Estimates of HIV infected is to other factors from the World Bank dataset, the Avg. Estimates of HIV Infected is negatively correlated to Educational enrollment albiet a weak negative correlation at -0.06 meaning that as one increases, the other decreases but ever so slightly. The Avg. Estimates of the HIV Infected is moderately, postively correlated to Monetary factor and appears to be the factor with the strongest correlation to Avg. estimates of HIV infected relative to other factors. 
+
+## Question 2
+
+You have been provided with data on the under-five mortality rate and neonatal mortality rate for the African region, which has been downloaded from the UN Inter-agency Group for Child Mortality Estimation. Your task is to:
+
+**Section a**\
+Filter data for the eight countries belonging to the East African Community (list is [here](https://www.eac.int/overview-of-eac))
+
+```{python}
+child_mort_df.info()
+```
+
+```{python}
+# Get a subset of columns of interest
+mort_subset_columns = ["REF_AREA", "Geographic area", "Indicator", "Sex", 
+                       "Series Year", "Observation Value"]
+                       
+# Subset the dataframe with the chosen columns
+child_mort_df = child_mort_df[mort_subset_columns]
+
+child_mort_df.head()
+```
+
+```{python}
+# Get the EAC country codes
+EAC_codes = ["KEN", "RWA", "SSD", "TZA", "UGA", "SOM", "BDI", "COD"]
+
+# Extract records from EAC countries only
+EAC_child_mort = child_mort_df[child_mort_df["REF_AREA"].isin(
+    EAC_codes)].reset_index(drop=True)
+
+EAC_child_mort.info()
+```
+```{python}
+# Rename columns
+EAC_child_mort = EAC_child_mort.rename(columns={"REF_AREA": "Ref area", "Geographic area":"Country"})
+```
+
+**Section b**\
+Visualize the latest estimate of each indicator at the country level using shapefiles, which can be downloaded from [here](www.gadm.org).
+
+```{python}
+# Read in all the EAC country vectors from the shape files
+KEN_gdf = gpd.read_file("data/shapefiles/KEN/gadm41_KEN_0.shp")
+RWA_gdf = gpd.read_file("data/shapefiles/RWA/gadm41_RWA_0.shp")
+SSD_gdf = gpd.read_file("data/shapefiles/SSD/gadm41_SSD_0.shp")
+TZA_gdf = gpd.read_file("data/shapefiles/TZA/gadm41_TZA_0.shp")
+UGA_gdf = gpd.read_file("data/shapefiles/UGA/gadm41_UGA_0.shp")
+SOM_gdf = gpd.read_file("data/shapefiles/SOM/gadm41_SOM_0.shp")
+BDI_gdf = gpd.read_file("data/shapefiles/BDI/gadm41_BDI_0.shp")
+COD_gdf = gpd.read_file("data/shapefiles/COD/gadm41_COD_0.shp")
+
+# Concatenate the country gdfs
+EAC_gdf = pd.concat([KEN_gdf, RWA_gdf, SSD_gdf, TZA_gdf, UGA_gdf, SOM_gdf, BDI_gdf, COD_gdf], ignore_index=True)
+
+# Rename columns
+EAC_gdf = EAC_gdf.rename(columns={"GID_0": "Ref area", "COUNTRY": "Country"})
+
+EAC_gdf
+```
+```{python}
+EAC_gdf.columns
+```
+
+```{python}
+# Get the latest estimates for both sexes
+latest_estimates = EAC_child_mort[(EAC_child_mort["Sex"] == "Total") & (EAC_child_mort["Series Year"] == "2023")]
+
+# Split the latest estimates into Neonatal & Under-five
+latest_neonatal_estimates = latest_estimates[latest_estimates["Indicator"] == "Neonatal mortality rate"]
+latest_under_five_estimates = latest_estimates[latest_estimates["Indicator"] == "Under-five mortality rate"]
+
+# Aggregate the latest neonatal and under-five mortality rate estimates
+avg_neonatal_estimates = latest_neonatal_estimates.groupby("Country").agg(
+  {"Observation Value": "mean"}).reset_index()
+avg_under_five_estimates = latest_under_five_estimates.groupby("Country").agg({"Observation Value": "mean"}).reset_index()
+    
+# Merge the neonatal and under-five aggregated estimates to the EAC geodataframe
+avg_neonatal_gdf = EAC_gdf.merge(avg_neonatal_estimates[["Country", "Observation Value"]], on="Country", how="inner")
+avg_under_five_gdf = EAC_gdf.merge(avg_under_five_estimates[["Country", "Observation Value"]], on="Country", how="inner")
+
+
+```
+
+```{python}
+avg_neonatal_gdf.sort_values(by="Observation Value", ascending=False)
+```
+
+```{python}
+avg_under_five_gdf.sort_values(by="Observation Value", ascending=False)
+```
+
+```{python}
+# Create a plot of two subplots side by side
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 10))
+
+# Plot the latest aggregated neonatal mortality rates on EAC spatial vectors
+avg_neonatal_gdf.plot(column="Observation Value", 
+                cmap="OrRd", # Adjust the color mapping to show intensity
+                legend=True,
+                edgecolor="black",
+                linewidth=0.2,
+                legend_kwds={
+                    "shrink": 0.6, # Adjust the height of the color bar
+                },
+                ax=ax1)
+
+# Plot the latest aggregated under-five mortality rates on EAC spatial vectors
+avg_under_five_gdf.plot(column="Observation Value", 
+                cmap="OrRd", # Adjust the color mapping to show intensity
+                legend=True,
+                edgecolor="black",
+                linewidth=0.2,
+                legend_kwds={
+                    "shrink": 0.6, # Adjust the height of the color bar
+                },
+                ax=ax2)
+
+# Set the titles and remove the the axis boundary for each subplot
+ax1.set_title("Avg. Neonatal Mortality Rate per Country (2023)", fontsize=15)
+ax2.set_title("Avg. Under-five Mortality Rate per Country (2023)", fontsize=15)
+ax1.axis("off")
+ax2.axis("off")
+
+# Tighten the layout and displaly the plot
+plt.tight_layout()
+plt.show()
+```
+
+**Section c**\
+Show the average trends in the mortality rates over time (plot the average trend line and add the points in the graphic for the country level estimates for each indicator. Expectation: two plots).
+
+```{python}
+EAC_child_mort.head()
+```
+
+```{python}
+# Define a custom function to extract the upper bound of the year
+def extract_latest_year(input_string):
+    if "-" in input_string:
+        latest_year = input_string.split("-")[1]
+    else:
+        latest_year = input_string
+    return latest_year
+
+# Make a copy of the EAC child mortality df
+EAC_mort_trend = EAC_child_mort.copy()
+
+# Extract the upper bound of each Series Year in a range format
+EAC_mort_trend["Series Year"] = EAC_mort_trend["Series Year"].apply(extract_latest_year)
+```
+
+```{python}
+# Subset only the total sex
+EAC_mort_trend[EAC_mort_trend["Sex"] == "Total"]
+
+# Remove the Reference Date column
+EAC_mort_trend = EAC_mort_trend[["Ref area", "Country", "Indicator", "Sex",
+                                 "Series Year", "Observation Value"]]
+
+# Split the dataset into two datasets for the neonatal and under-five mortality
+EAC_neonatal_trend = EAC_mort_trend[EAC_mort_trend["Indicator"] == "Neonatal mortality rate"]
+EAC_under_five_trend = EAC_mort_trend[EAC_mort_trend["Indicator"] == "Under-five mortality rate"]
+
+# Compute the average trend for both indicators across the years
+neonatal_avg_trend = EAC_neonatal_trend.groupby("Series Year")["Observation Value"].mean().reset_index()
+under_five_avg_trend = EAC_under_five_trend.groupby("Series Year")["Observation Value"].mean().reset_index()
+```
+
+```{python}
+# Create a figure of 2 subplots
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(16, 16))
+
+# Plot the country points
+sns.scatterplot(
+    data=EAC_neonatal_trend.sort_values(by="Series Year"),
+    x="Series Year",
+    y="Observation Value",
+    hue="Country",
+    alpha=0.6, # transparency
+    s=60, # point size
+    legend=True,
+    ax=ax1
+)
+
+# Line plot of the EAC average of neonatal mortality over time
+sns.lineplot(
+    data=neonatal_avg_trend,
+    x="Series Year",
+    y="Observation Value",
+    linewidth=2.5,
+    label="EAC Average Trend",
+    ax=ax1
+)
+
+# Plot the country points
+sns.scatterplot(
+    data=EAC_under_five_trend.sort_values(by="Series Year"),
+    x="Series Year",
+    y="Observation Value",
+    hue="Country",
+    alpha=0.6,
+    s=60,      # size of the points
+    legend=True,
+    ax=ax2
+)
+
+# Line plot of the EAC average of under-five mortality over time
+sns.lineplot(
+    data=under_five_avg_trend,
+    x="Series Year",
+    y="Observation Value",
+    linewidth=2.5,
+    label="EAC Average Trend",
+    ax=ax2
+)
+
+# Set the respective attributes for the respective axes/plots
+ax1.set_title("Yearly Trends of Neonatal Mortality Rates", fontsize=18)
+ax1.set_xlabel("Year")
+ax1.set_ylabel("Neonatal Mortality Rates")
+ax1.legend(
+    title="Legend",
+    bbox_to_anchor=(0.85, 1),
+    loc="upper right",
+    fontsize="small",
+    title_fontsize="medium")
+ax1.grid(True)
+
+ax2.set_title("Yearly Trends of Under-five Mortality Rates", fontsize=18)
+ax2.set_xlabel("Year")
+ax2.set_ylabel("Under-five Mortality Rates")
+ax2.legend(
+    title="Legend",
+    bbox_to_anchor=(0.85, 1),
+    loc="upper right",
+    fontsize="small",
+    title_fontsize="medium")
+ax2.grid(True)
+plt.xticks(rotation=45)
+
+# Adjust the layout
+plt.tight_layout()
+
+# Display the plot
+plt.show()
+```
+
+**Section d**\
+Based on your visualizations, identify the countries with the highest under-five mortality rates in East Africa and the highest neonatal mortality.
+
+Top 5 Countries With the Highest Neonatal Mortality Rate
+
+- South Sudan
+- Somalia
+- Rwanda
+- Uganda
+- Burundi
+
+
+Top 5 Countries With the Highest Under-five Mortality Rate
+
+- South Sudan
+- Somalia
+- Democratic Republic of Congo
+- Rwanda
+- Burundi
